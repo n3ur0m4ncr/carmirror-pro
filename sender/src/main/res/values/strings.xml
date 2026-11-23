@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarMirror Sender</string>
+    <string name="accessibility_service_label">CarMirror Controle Automotivo (Touchback)</string>
+    <string name="accessibility_service_description">Permite controlar o smartphone diretamente pelos toques na tela da central multimídia automotiva.</string>
+</resources>
