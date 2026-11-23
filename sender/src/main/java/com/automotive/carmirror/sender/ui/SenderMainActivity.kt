@@ -194,7 +194,7 @@ class SenderMainActivity : AppCompatActivity() {
         headerRow.addView(brandCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val versionPill = TextView(this).apply {
-            text = "v1.6"
+            text = "v1.7"
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
@@ -402,22 +402,28 @@ class SenderMainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#1E293B"))
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
 
-        // Linha 4: Modo Tela Escura (0.5% AMOLED — mantém T3L 100% acesa!)
+        // Linha 4: Modo Tela Escura Real (0% Brilho físico no celular sem usar botão Power!)
         dimScreenPill = TextView(this)
         checklistCard.addView(
             createChecklistRow(
                 iconText = "🌙",
-                title = "Tela Mínima no Celular (0.5%)",
-                subtitle = "Escurece o celular mantendo a T3L 100% ligada",
+                title = "Escurecer Tela do Celular (0%)",
+                subtitle = "Usa brilho físico 0% sem apertar Power (T3L segue 100% acesa!)",
                 badgeView = dimScreenPill
             ) {
-                if (ScreenCaptureService.serviceState.value.isStreaming) {
+                if (!Settings.System.canWrite(this)) {
+                    requestWriteSettingsPermission()
+                } else if (ScreenCaptureService.serviceState.value.isStreaming) {
                     val intent = Intent(this, ScreenCaptureService::class.java).apply {
                         action = ScreenCaptureService.ACTION_TOGGLE_DIM_SCREEN
                     }
                     startService(intent)
                 } else {
-                    Toast.makeText(this, "Inicie o espelhamento primeiro para ativar a Tela 0.5%.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        this,
+                        "Liberado! Ao conectar na T3L a tela do celular escurecerá automaticamente para 0%.",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         )
@@ -898,15 +904,50 @@ class SenderMainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestWriteSettingsPermission() {
+        AlertDialog.Builder(this)
+            .setTitle("Escurecer Tela do Celular (0%) sem desligar a T3L")
+            .setMessage(
+                "No Android 14/15, apertar o botão físico Power bloqueia o celular e o sistema encerra o espelhamento.\n\n" +
+                    "Liberando 'Modificar configurações do sistema', o CarMirror reduz o brilho físico do seu celular para 0% automaticamente ao conectar na multimídia — mantendo a T3L 100% acesa!"
+            )
+            .setPositiveButton("Liberar Agora") { _, _ ->
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS))
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
     private fun updateDimScreenPillUi(dimActive: Boolean) {
-        if (dimActive) {
-            dimScreenPill.text = "ATIVA (0.5%)"
-            dimScreenPill.setTextColor(Color.parseColor("#38BDF8"))
-            dimScreenPill.background = createBorderedRoundedDrawable("#0F2942", "#38BDF8", 1, dp(10))
-        } else {
-            dimScreenPill.text = "NORMAL"
-            dimScreenPill.setTextColor(Color.parseColor("#94A3B8"))
-            dimScreenPill.background = createBorderedRoundedDrawable("#162033", "#243554", 1, dp(10))
+        val canWrite = Settings.System.canWrite(this)
+        when {
+            !canWrite -> {
+                dimScreenPill.text = "LIBERAR ›"
+                dimScreenPill.setTextColor(Color.parseColor("#FBBF24"))
+                dimScreenPill.background = createBorderedRoundedDrawable("#2A1E0A", "#D97706", 1, dp(10))
+            }
+            dimActive -> {
+                dimScreenPill.text = "ATIVA (0%) ✓"
+                dimScreenPill.setTextColor(Color.parseColor("#38BDF8"))
+                dimScreenPill.background = createBorderedRoundedDrawable("#0F2942", "#38BDF8", 1, dp(10))
+            }
+            ScreenCaptureService.serviceState.value.isStreaming -> {
+                dimScreenPill.text = "ATIVAR 0%"
+                dimScreenPill.setTextColor(Color.parseColor("#94A3B8"))
+                dimScreenPill.background = createBorderedRoundedDrawable("#162033", "#243554", 1, dp(10))
+            }
+            else -> {
+                dimScreenPill.text = "AUTO 0% ✓"
+                dimScreenPill.setTextColor(Color.parseColor("#34D399"))
+                dimScreenPill.background = createBorderedRoundedDrawable("#0B2A22", "#10B981", 1, dp(10))
+            }
         }
     }
 

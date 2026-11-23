@@ -126,7 +126,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         audioMuteBtn.background = createBorderedRoundedDrawable("#0B2A22", "#10B981", 1, dp(10))
                     }
                     if (dimPhoneScreen) {
-                        dimPhoneBtn.text = "🌙 Tela 0.5%"
+                        dimPhoneBtn.text = "🌙 Tela 0%"
                         dimPhoneBtn.background = createBorderedRoundedDrawable("#0F2942", "#38BDF8", 1, dp(10))
                     } else {
                         dimPhoneBtn.text = "☀ Tela Celular"
@@ -235,7 +235,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         })
         brandTexts.addView(TextView(this).apply {
-            text = "Wireless H.264 Cockpit • v1.6"
+            text = "Wireless H.264 Cockpit • v1.7"
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         })

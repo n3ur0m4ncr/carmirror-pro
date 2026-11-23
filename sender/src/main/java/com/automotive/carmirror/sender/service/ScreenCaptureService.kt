@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
@@ -90,6 +91,12 @@ class ScreenCaptureService : Service() {
 
     @Volatile
     private var savedPhoneMusicVolume: Int = -1
+
+    @Volatile
+    private var savedSystemBrightness: Int = -1
+
+    @Volatile
+    private var savedSystemBrightnessMode: Int = -1
 
     /**
      * Monitora se a tela física do celular foi apagada pelo botão Power durante o espelhamento.
@@ -219,10 +226,18 @@ class ScreenCaptureService : Service() {
         val server = MirrorStreamingServer(
             port = MirrorProtocol.TCP_STREAM_PORT,
             onClientConnectionChanged = { connected, clientIp ->
-                if (connected && isReceiverOnlyAudio) {
-                    applyPhoneSpeakerSilenceForReceiverOnly()
-                } else if (!connected) {
+                if (connected) {
+                    if (isReceiverOnlyAudio) {
+                        applyPhoneSpeakerSilenceForReceiverOnly()
+                    }
+                    // Se o usuário liberou WRITE_SETTINGS, escurece automaticamente a tela do celular para 0%
+                    // ao conectar na T3L (sem apertar o botão Power e sem desligar a multimídia!)
+                    if (Settings.System.canWrite(this@ScreenCaptureService)) {
+                        setDimPhoneScreen(true)
+                    }
+                } else {
                     restorePhoneSpeakerVolume()
+                    setDimPhoneScreen(false)
                 }
                 _serviceState.value = _serviceState.value.copy(
                     isReceiverConnected = connected,
@@ -359,15 +374,84 @@ class ScreenCaptureService : Service() {
     }
 
     private fun toggleDimPhoneScreen() {
-        isDimScreenActive = !isDimScreenActive
-        _serviceState.value = _serviceState.value.copy(isDimScreenActive = isDimScreenActive)
+        setDimPhoneScreen(!isDimScreenActive)
+    }
+
+    @Synchronized
+    private fun setDimPhoneScreen(enable: Boolean) {
+        isDimScreenActive = enable
+        _serviceState.value = _serviceState.value.copy(isDimScreenActive = enable)
+
+        if (enable) {
+            applyMinimumSystemBrightness()
+        } else {
+            restoreSystemBrightness()
+        }
+
         if (_serviceState.value.isStreaming) {
-            TouchAccessibilityService.instance?.updateKeepAwakeOverlay(true, dimPhoneScreen = isDimScreenActive)
+            TouchAccessibilityService.instance?.updateKeepAwakeOverlay(true, dimPhoneScreen = enable)
             streamingServer?.sendTouchbackStatus(
                 TouchAccessibilityService.isServiceEnabled(),
                 isRemoteAudioMuted,
                 isDimScreenActive
             )
+        }
+    }
+
+    /**
+     * Reduz o brilho físico do painel AMOLED do celular para 0/255 via WRITE_SETTINGS
+     * sem bloquear o dispositivo nem encerrar o MediaProjection (mantém a T3L 100% brilhante!).
+     */
+    @Synchronized
+    private fun applyMinimumSystemBrightness() {
+        try {
+            if (!Settings.System.canWrite(this)) return
+            val cr = contentResolver
+            if (savedSystemBrightnessMode < 0) {
+                savedSystemBrightnessMode = Settings.System.getInt(
+                    cr,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+                )
+            }
+            if (savedSystemBrightness < 0) {
+                savedSystemBrightness = Settings.System.getInt(
+                    cr,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    128
+                )
+            }
+            Settings.System.putInt(
+                cr,
+                Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+            )
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, 0)
+            Log.i(TAG, "Brilho físico do celular reduzido para 0/255 (salvo=$savedSystemBrightness, modo=$savedSystemBrightnessMode)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Aviso ao aplicar brilho 0/255: ${e.message}")
+        }
+    }
+
+    @Synchronized
+    private fun restoreSystemBrightness() {
+        if (savedSystemBrightness < 0 && savedSystemBrightnessMode < 0) return
+        try {
+            if (Settings.System.canWrite(this)) {
+                val cr = contentResolver
+                if (savedSystemBrightness >= 0) {
+                    Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, savedSystemBrightness)
+                }
+                if (savedSystemBrightnessMode >= 0) {
+                    Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, savedSystemBrightnessMode)
+                }
+                Log.i(TAG, "Brilho original do celular restaurado ($savedSystemBrightness / modo=$savedSystemBrightnessMode)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Aviso ao restaurar brilho original: ${e.message}")
+        } finally {
+            savedSystemBrightness = -1
+            savedSystemBrightnessMode = -1
         }
     }
 
@@ -531,6 +615,7 @@ class ScreenCaptureService : Service() {
 
     private fun stopActiveComponents() {
         restorePhoneSpeakerVolume()
+        restoreSystemBrightness()
         unregisterScreenOffWatcher()
         isDimScreenActive = false
         TouchAccessibilityService.instance?.updateKeepAwakeOverlay(false, false)

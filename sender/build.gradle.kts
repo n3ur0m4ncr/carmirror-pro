@@ -11,8 +11,8 @@ android {
         applicationId = "com.automotive.carmirror.sender"
         minSdk = 29 // Android 10+ exigido para AudioPlaybackCaptureConfiguration
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.6.0"
+        versionCode = 10
+        versionName = "1.7.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

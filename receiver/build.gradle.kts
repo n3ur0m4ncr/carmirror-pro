@@ -11,8 +11,8 @@ android {
         applicationId = "com.automotive.carmirror.receiver"
         minSdk = 26
         targetSdk = 31 // Target específico para Allwinner T3L (Android 12 / API 31)
-        versionCode = 9
-        versionName = "1.6.0-T3L"
+        versionCode = 10
+        versionName = "1.7.0-T3L"
 
         // CRÍTICO para Allwinner T3L (ARM Cortex-A7 32-bit):
         // Garante compatibilidade com armeabi-v7a (32-bit) e arm64-v8a (64-bit)

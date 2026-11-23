@@ -69,9 +69,10 @@ class TouchAccessibilityService : AccessibilityService() {
 
     /**
      * Mantém o display ativo em segundo plano em QUALQUER aplicativo (Waze, Maps, YouTube, Spotify)
-     * usando uma janela invisível 1x1 TYPE_ACCESSIBILITY_OVERLAY com FLAG_KEEP_SCREEN_ON.
-     * Quando dimPhoneScreen=true, reduz o brilho físico da tela AMOLED do celular para 0.5% (quase apagada)
-     * mantendo a imagem na central multimídia T3L com 100% de brilho e nitidez!
+     * usando uma janela MATCH_PARENT totalmente transparente (Color.TRANSPARENT) TYPE_ACCESSIBILITY_OVERLAY
+     * com FLAG_KEEP_SCREEN_ON e FLAG_NOT_TOUCHABLE.
+     * Por ser MATCH_PARENT, a OneUI da Samsung aplica corretamente o screenBrightness = 0.001f (mínimo físico),
+     * enquanto o MediaProjection continua enviando a imagem com 100% de brilho e nitidez para a T3L!
      */
     fun updateKeepAwakeOverlay(keepAwake: Boolean, dimPhoneScreen: Boolean) {
         mainHandler.post {
@@ -82,8 +83,8 @@ class TouchAccessibilityService : AccessibilityService() {
             try {
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val params = WindowManager.LayoutParams(
-                    1,
-                    1,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -95,14 +96,13 @@ class TouchAccessibilityService : AccessibilityService() {
                     gravity = Gravity.TOP or Gravity.START
                     x = 0
                     y = 0
-                    screenBrightness = if (dimPhoneScreen) 0.005f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                    screenBrightness = if (dimPhoneScreen) 0.001f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 }
 
                 val existing = keepAwakeOverlayView
                 if (existing == null) {
                     val v = View(this).apply {
                         setBackgroundColor(Color.TRANSPARENT)
-                        alpha = 0.01f
                     }
                     wm.addView(v, params)
                     keepAwakeOverlayView = v
