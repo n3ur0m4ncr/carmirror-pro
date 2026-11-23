@@ -116,9 +116,12 @@ try {
     }
 
     # Cria ou atualiza a Release no GitHub com os 2 APKs + version.json
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $releaseExists = $true
-    gh release view $tagName --repo $Repo *> $null
+    gh release view $tagName --repo $Repo 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { $releaseExists = $false }
+    $ErrorActionPreference = $prevEap
 
     if ($releaseExists) {
         Write-Host "Atualizando arquivos da Release existente $tagName..." -ForegroundColor Yellow
