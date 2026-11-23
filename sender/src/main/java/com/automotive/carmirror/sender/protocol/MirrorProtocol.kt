@@ -10,6 +10,8 @@ object MirrorProtocol {
 
     const val DISCOVERY_MAGIC_BEACON = "CARMIRROR_SENDER_V1"
     const val DISCOVERY_MAGIC_PROBE = "CARMIRROR_RECEIVER_PROBE_V1"
+    const val NSD_SERVICE_TYPE = "_carmirror._tcp."
+    const val NSD_SERVICE_NAME = "CarMirrorPro"
 
     // Downstream (Celular -> Central Multimídia T3L)
     const val TYPE_VIDEO_CONFIG: Byte = 0x01   // SPS / PPS (CSD-0)
@@ -19,15 +21,17 @@ object MirrorProtocol {
     const val TYPE_STREAM_META: Byte = 0x05    // Resolução (W, H, FPS)
     const val TYPE_HEARTBEAT: Byte = 0x06      // Keep-alive
     const val TYPE_TOUCHBACK_STATUS: Byte = 0x07 // 1 = Touchback ativo, 0 = Pendente
+    const val TYPE_PING_TELEMETRY: Byte = 0x08 // Ping RTT + Bitrate atual (kbps) + FPS real
 
     // Upstream (Central Multimídia T3L -> Celular)
     const val CMD_TOUCH_EVENT: Byte = 0x10     // Evento de toque normalizado (0.0..1.0)
     const val CMD_REQUEST_IDR: Byte = 0x11     // Solicitação imediata de Keyframe (I-Frame)
     const val CMD_CHANGE_PROFILE: Byte = 0x12  // Ajuste dinâmico de resolução/FPS
     const val CMD_SYSTEM_NAV: Byte = 0x13      // Botões virtuais: Back(1), Home(2), Recents(3)
-    const val CMD_MEDIA_CONTROL: Byte = 0x14   // 1=PlayPause, 2=Next, 3=Prev, 4=Vol+, 5=Vol-, 6=ToggleAudio
+    const val CMD_MEDIA_CONTROL: Byte = 0x14   // 1=PlayPause, 2=Next, 3=Prev, 4=Vol+, 5=Vol-, 6=ToggleAudio, 7=DimScreen
     const val CMD_LAUNCH_APP: Byte = 0x15      // 1=Waze, 2=Maps, 3=Spotify, 4=YouTube, 5=YTMusic
     const val CMD_STOP_REMOTE: Byte = 0x16     // Encerra transmissão no celular remotamente
+    const val CMD_PONG: Byte = 0x17            // Resposta imediata de RTT para controle de Bitrate Adaptativo (ABR)
 
     // Ações de Toque
     const val TOUCH_ACTION_DOWN: Byte = 0x00

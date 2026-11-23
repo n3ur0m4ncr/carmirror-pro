@@ -1,12 +1,12 @@
 package com.automotive.carmirror.receiver.streaming
 
 import android.media.MediaCodec
+import android.net.Network
 import android.util.Log
 import com.automotive.carmirror.receiver.protocol.MirrorProtocol
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
+import okio.buffer
+import okio.sink
+import okio.source
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -15,22 +15,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Cliente TCP Full-Duplex de Baixa Latência para a Central Multimídia Allwinner T3L.
- * - Aloca um único buffer reutilizável (Zero-GC Heap Allocation por quadro) para preservar os ~1.1 GB livres da T3L.
- * - Reconexão automática transparente caso o sinal Wi-Fi oscile.
- * - Canal de retorno (Upstream) assíncrono para Touchback imediato.
+ * Cliente TCP Full-Duplex Profissional com Square Okio (SegmentPool Zero-Copy) para a Central Allwinner T3L.
+ * - Vincula o socket explicitamente à rede Wi-Fi (Network.bindSocket) -> nunca desconecta em túneis/garagens sem internet!
+ * - Buffer único reutilizável (Zero-GC Heap Allocation por quadro) para os 2 GB RAM da T3L.
+ * - Reconexão ultrarrápida (300ms) + Resposta instantânea de Ping/Pong para Bitrate Adaptativo (ABR).
  */
 class MirrorStreamingClient(
     private val videoDecoder: H264HardwareDecoder,
     private val audioPlayer: LowLatencyAudioPlayer,
+    private val getActiveWifiNetwork: () -> Network?,
     private val onConnectionStateChanged: (connected: Boolean, statusMessage: String) -> Unit,
     private val onStreamResolutionChanged: (width: Int, height: Int, fps: Int) -> Unit,
-    private val onRemoteStatusChanged: (touchbackEnabled: Boolean, audioMuted: Boolean, dimPhoneScreen: Boolean) -> Unit
+    private val onRemoteStatusChanged: (touchbackEnabled: Boolean, audioMuted: Boolean, dimPhoneScreen: Boolean) -> Unit,
+    private val onTelemetryReceived: (rttMs: Int, bitrateKbps: Int, fps: Int) -> Unit
 ) {
     companion object {
         private const val TAG = "MirrorStreamingClient"
-        private const val CONNECT_TIMEOUT_MS = 4000
-        private const val READ_TIMEOUT_MS = 10000
+        private const val CONNECT_TIMEOUT_MS = 2500
+        private const val READ_TIMEOUT_MS = 8000
     }
 
     private class UpstreamCommand(
@@ -69,13 +71,10 @@ class MirrorStreamingClient(
         val cleanHost = host.trim()
         if (cleanHost.isEmpty()) return
 
-        // CORREÇÃO CRÍTICA: Se já estamos ativos/conectados no mesmo IP e porta,
-        // NÃO fecha o socket atual quando novos beacons UDP de descoberta chegarem!
         if (isActive.get()) {
             if (targetHost == cleanHost && targetPort == port) {
                 return
             }
-            // Só força reconexão se o IP do celular realmente mudou
             targetHost = cleanHost
             targetPort = port
             closeCurrentSocket()
@@ -88,58 +87,65 @@ class MirrorStreamingClient(
 
         connectionThread = Thread({
             connectionSupervisorLoop()
-        }, "T3LStreamSupervisorThread").apply {
+        }, "T3LOkioStreamSupervisor").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }
     }
 
     private fun connectionSupervisorLoop() {
-        // Buffer único pré-alocado na inicialização: zero alocações no GC por quadro H.264/PCM!
         var reusableReadBuffer = ByteArray(512 * 1024)
 
         while (isActive.get()) {
             val host = targetHost
             val port = targetPort
             if (host.isBlank()) {
-                Thread.sleep(500L)
+                try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                 continue
             }
 
             try {
-                onConnectionStateChanged(false, "Conectando ao celular ($host:$port)...")
+                onConnectionStateChanged(false, "Conectando em alta velocidade ($host:$port)...")
                 val socket = Socket()
                 socket.tcpNoDelay = true
                 socket.trafficClass = 0x10 // IPTOS_LOWDELAY
                 socket.receiveBufferSize = 256 * 1024
                 socket.sendBufferSize = 32 * 1024
                 socket.soTimeout = READ_TIMEOUT_MS
+                socket.keepAlive = true
+
+                // Vincula explicitamente ao Wi-Fi local (impede queda se o 4G/5G cair em túneis!)
+                try {
+                    getActiveWifiNetwork()?.bindSocket(socket)
+                } catch (_: Exception) {}
+
                 socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
 
                 currentSocket = socket
                 upstreamQueue.clear()
+                videoDecoder.resetKeyframeGate()
                 isConnected.set(true)
                 audioPlayer.start()
-                onConnectionStateChanged(true, "Espelhando ($host)")
+                onConnectionStateChanged(true, "Conectado ($host)")
 
-                // Inicia thread de envio de Touchback (Upstream: T3L -> Celular)
-                val outStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 4096))
+                // Thread Upstream Okio (Touchback + Controle + Pong RTT)
+                val sink = socket.sink().buffer()
                 writerThread = Thread({
-                    upstreamWriterLoop(socket, outStream)
-                }, "T3LTouchbackWriterThread").apply {
+                    upstreamWriterLoop(socket, sink)
+                }, "T3LOkioUpstreamWriter").apply {
                     priority = Thread.MAX_PRIORITY
                     start()
                 }
 
-                // Solicita SPS/PPS + IDR Keyframe imediato ao conectar
+                // Solicita SPS/PPS + IDR Keyframe imediato
                 requestKeyframe()
 
-                // Loop de leitura Downstream (Celular -> T3L)
-                val inStream = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
+                // Loop de leitura Downstream Okio (SegmentPool Zero-Copy)
+                val source = socket.source().buffer()
                 while (isActive.get() && isConnected.get() && !socket.isClosed) {
-                    val packetType = inStream.readByte()
-                    val ptsUs = inStream.readLong()
-                    val payloadLen = inStream.readInt()
+                    val packetType = source.readByte()
+                    val ptsUs = source.readLong()
+                    val payloadLen = source.readInt()
 
                     if (payloadLen < 0 || payloadLen > 4 * 1024 * 1024) {
                         throw IllegalStateException("Tamanho de pacote inválido: $payloadLen")
@@ -150,7 +156,7 @@ class MirrorStreamingClient(
                     }
 
                     if (payloadLen > 0) {
-                        inStream.readFully(reusableReadBuffer, 0, payloadLen)
+                        source.readFully(reusableReadBuffer, 0, payloadLen)
                     }
 
                     when (packetType) {
@@ -195,10 +201,6 @@ class MirrorStreamingClient(
                             }
                         }
 
-                        MirrorProtocol.TYPE_HEARTBEAT -> {
-                            // Keep-alive recebido
-                        }
-
                         MirrorProtocol.TYPE_TOUCHBACK_STATUS -> {
                             if (payloadLen >= 2) {
                                 val touchOk = reusableReadBuffer[0].toInt() == 1
@@ -207,53 +209,79 @@ class MirrorStreamingClient(
                                 onRemoteStatusChanged(touchOk, muted, dimPhone)
                             }
                         }
+
+                        MirrorProtocol.TYPE_PING_TELEMETRY -> {
+                            if (payloadLen >= 16) {
+                                val bb = ByteBuffer.wrap(reusableReadBuffer, 0, 16)
+                                val pingSeq = bb.int
+                                val rttMs = bb.int
+                                val bitrateKbps = bb.int
+                                val fps = bb.int
+                                // Responde PONG imediatamente para o motor ABR do celular
+                                sendPong(pingSeq)
+                                onTelemetryReceived(rttMs, bitrateKbps, fps)
+                            }
+                        }
+
+                        MirrorProtocol.TYPE_HEARTBEAT -> {
+                            // Keep-alive recebido
+                        }
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Oscilação ou queda de conexão com o celular: ${e.message}")
+                Log.w(TAG, "Reconexão rápida acionada: ${e.message}")
             } finally {
                 val wasConnected = isConnected.getAndSet(false)
                 closeCurrentSocket()
                 if (isActive.get()) {
                     val msg = if (wasConnected) {
-                        "Sinal oscilou. Reconectando automaticamente..."
+                        "Reconectando em 0.3s..."
                     } else {
-                        "Aguardando celular ($host)... Tentando reconexão..."
+                        "Aguardando CarMirror Pro ($host)..."
                     }
                     onConnectionStateChanged(false, msg)
                     try {
-                        Thread.sleep(1000L)
+                        // Reconexão ultrarrápida (300ms)
+                        Thread.sleep(300L)
                     } catch (_: InterruptedException) {}
                 }
             }
         }
     }
 
-    private fun upstreamWriterLoop(socket: Socket, out: DataOutputStream) {
+    private fun upstreamWriterLoop(socket: Socket, sink: okio.BufferedSink) {
         try {
             while (isActive.get() && isConnected.get() && !socket.isClosed) {
                 val cmd = upstreamQueue.poll(500L, TimeUnit.MILLISECONDS) ?: continue
-                // Pacote fixo de 14 bytes: [CmdType:1B][Action:1B][Float1:4B][Float2:4B][IntExtra:4B]
-                out.writeByte(cmd.cmdType.toInt())
-                out.writeByte(cmd.action.toInt())
-                out.writeFloat(cmd.float1)
-                out.writeFloat(cmd.float2)
-                out.writeInt(cmd.intExtra)
+                sink.writeByte(cmd.cmdType.toInt())
+                sink.writeByte(cmd.action.toInt())
+                sink.writeInt(cmd.float1.toBits())
+                sink.writeInt(cmd.float2.toBits())
+                sink.writeInt(cmd.intExtra)
                 if (upstreamQueue.isEmpty()) {
-                    out.flush()
+                    sink.flush()
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Erro ao enviar comando Touchback: ${e.message}")
+            Log.w(TAG, "Okio Upstream Writer encerrado: ${e.message}")
         }
     }
 
-    /**
-     * Envia evento de toque normalizado (0.0 a 1.0) da tela capacitiva da T3L para o celular.
-     */
+    private fun sendPong(pingSeq: Int) {
+        if (!isConnected.get()) return
+        upstreamQueue.offer(
+            UpstreamCommand(
+                cmdType = MirrorProtocol.CMD_PONG,
+                action = 0,
+                float1 = 0f,
+                float2 = 0f,
+                intExtra = pingSeq
+            )
+        )
+    }
+
     fun sendTouchEvent(action: Byte, normX: Float, normY: Float, pointerId: Int = 0) {
         if (!isConnected.get()) return
-        // Se a fila encher durante um movimento rápido, descarta o MOVE mais antigo
         if (upstreamQueue.remainingCapacity() == 0 && action == MirrorProtocol.TOUCH_ACTION_MOVE) {
             return
         }

@@ -194,7 +194,7 @@ class SenderMainActivity : AppCompatActivity() {
         headerRow.addView(brandCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val versionPill = TextView(this).apply {
-            text = "v1.7"
+            text = "v2.0"
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
@@ -850,10 +850,13 @@ class SenderMainActivity : AppCompatActivity() {
                     state.isReceiverConnected -> {
                         statusCard.background = createBorderedRoundedDrawable("#0B241E", "#10B981", 2, dp(18))
                         setDotColor("#10B981")
-                        statusPillText.text = "TRANSMISSÃO AO VIVO"
+                        statusPillText.text = "AO VIVO • OKIO ABR"
                         statusPillText.setTextColor(Color.parseColor("#34D399"))
                         statusHeadlineText.text = "Conectado à Multimídia T3L"
-                        statusSubText.text = "Cliente: ${state.connectedReceiverIp} • ${state.activeProfile.width}×${state.activeProfile.height} @ ${state.activeProfile.fps}fps"
+                        val mbps = String.format("%.1f", (state.activeBitrateKbps.takeIf { it > 0 } ?: (state.activeProfile.bitrateBps / 1000)) / 1000.0)
+                        val rttTxt = if (state.rttMs > 0) "${state.rttMs}ms" else "<10ms"
+                        val fpsTxt = if (state.liveFps > 0) "${state.liveFps}fps" else "${state.activeProfile.fps}fps"
+                        statusSubText.text = "⚡ $rttTxt  •  ${mbps} Mbps  •  ${state.activeProfile.width}×${state.activeProfile.height} @ $fpsTxt (${state.connectedReceiverIp})"
                         connectToggleBtn.text = "■  ENCERRAR TRANSMISSÃO"
                         connectToggleBtn.background = createGradientRippleDrawable("#DC2626", "#991B1B", dp(16))
                     }

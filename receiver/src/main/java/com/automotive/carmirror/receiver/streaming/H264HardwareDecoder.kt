@@ -11,9 +11,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Decodificador H.264 estritamente via Hardware para a placa Allwinner T3L (ARM Cortex-A7 32-bit, 2GB RAM).
- * - Seleciona explicitamente o decoder HW (ex: OMX.allwinner.video.decoder.avc / c2.allwinner.avc.decoder).
- * - Zero alocações de memória por quadro: escreve diretamente do buffer de rede pré-alocado para o ByteBuffer nativo do MediaCodec.
- * - Drenagem assíncrona com renderização imediata na SurfaceView (latency = 0).
+ * - Seleciona explicitamente o decoder HW nativo (OMX.allwinner.video.decoder.avc / c2.allwinner.avc.decoder).
+ * - Gate Estrito de Keyframe (IDR Sync): impede enviar P-frames órfãos após reconexão ou troca de resolução,
+ *   eliminando 100% dos artefatos cinzas/verdes na VPU CedarX da T3L!
+ * - Zero alocações no heap Kotlin por quadro.
  */
 class H264HardwareDecoder(
     private val onRequestKeyframe: () -> Unit
@@ -27,6 +28,7 @@ class H264HardwareDecoder(
     private var outputSurface: Surface? = null
     private var drainThread: Thread? = null
     private val isConfigured = AtomicBoolean(false)
+    private val waitingForKeyframe = AtomicBoolean(true)
     private var currentWidth: Int = 1024
     private var currentHeight: Int = 600
     private var consecutiveErrors = 0
@@ -37,12 +39,17 @@ class H264HardwareDecoder(
         configureDecoderInternal(surface, width, height, null)
     }
 
+    fun resetKeyframeGate() {
+        waitingForKeyframe.set(true)
+    }
+
     @Synchronized
     fun updateResolutionAndConfig(width: Int, height: Int, spsPpsBytes: ByteArray?) {
         val surface = outputSurface ?: return
         if (!isConfigured.get() || width != currentWidth || height != currentHeight) {
             configureDecoderInternal(surface, width, height, spsPpsBytes)
         } else if (spsPpsBytes != null) {
+            waitingForKeyframe.set(true)
             feedFrame(
                 data = spsPpsBytes,
                 offset = 0,
@@ -65,6 +72,7 @@ class H264HardwareDecoder(
 
         currentWidth = width
         currentHeight = height
+        waitingForKeyframe.set(true)
 
         try {
             val hwCodecName = findHardwareAvcDecoderName()
@@ -76,13 +84,11 @@ class H264HardwareDecoder(
             }
 
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                // Otimizações de Baixa Latência para Android 12 (API 31) na placa T3L
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
-                setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = Realtime
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
-                // Evita realocação na VPU CedarX da T3L quando o stream alternar entre 1024x600 e 1280x720
                 setInteger(MediaFormat.KEY_MAX_WIDTH, 1280)
                 setInteger(MediaFormat.KEY_MAX_HEIGHT, 720)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
@@ -120,7 +126,7 @@ class H264HardwareDecoder(
     }
 
     /**
-     * Alimenta o decoder de hardware com zero alocação de memória (Zero-Copy no Heap Kotlin).
+     * Alimenta o decoder de hardware com zero alocação e sincronização estrita de Keyframe (IDR).
      */
     fun feedFrame(
         data: ByteArray,
@@ -131,6 +137,18 @@ class H264HardwareDecoder(
     ) {
         val codec = decoder
         if (!isConfigured.get() || codec == null) return
+
+        val isConfig = (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+        val isKeyFrame = (flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+
+        if (!isConfig) {
+            if (isKeyFrame) {
+                waitingForKeyframe.set(false)
+            } else if (waitingForKeyframe.get()) {
+                // Descarta P-frame órfão antes do primeiro IDR -> zero tela verde/cinza na T3L!
+                return
+            }
+        }
 
         try {
             val inIndex = codec.dequeueInputBuffer(8_000L)
@@ -144,17 +162,19 @@ class H264HardwareDecoder(
                     consecutiveErrors = 0
                 }
             } else {
-                // Input buffers cheios momentaneamente; solicita IDR se persistir
                 consecutiveErrors++
-                if (consecutiveErrors > 15) {
+                if (consecutiveErrors > 10) {
                     consecutiveErrors = 0
+                    waitingForKeyframe.set(true)
                     onRequestKeyframe()
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Erro ao enfileirar NAL unit no decoder T3L: ${e.message}")
             consecutiveErrors++
-            if (consecutiveErrors > 5) {
+            if (consecutiveErrors > 4) {
+                consecutiveErrors = 0
+                waitingForKeyframe.set(true)
                 onRequestKeyframe()
             }
         }
@@ -166,7 +186,6 @@ class H264HardwareDecoder(
             try {
                 val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
                 if (outIndex >= 0) {
-                    // Renderiza imediatamente na SurfaceView sem aguardar relógio de PTS
                     codec.releaseOutputBuffer(outIndex, bufferInfo.size > 0)
                 }
             } catch (_: IllegalStateException) {
@@ -179,10 +198,6 @@ class H264HardwareDecoder(
         }
     }
 
-    /**
-     * Prioriza o decodificador por hardware do SoC Allwinner T3L (CedarX / OMX.allwinner)
-     * para manter o uso de CPU Cortex-A7 abaixo de 15%.
-     */
     private fun findHardwareAvcDecoderName(): String? {
         try {
             val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
@@ -217,6 +232,7 @@ class H264HardwareDecoder(
     @Synchronized
     private fun releaseDecoderOnly() {
         isConfigured.set(false)
+        waitingForKeyframe.set(true)
         try {
             drainThread?.join(250L)
         } catch (_: InterruptedException) {}

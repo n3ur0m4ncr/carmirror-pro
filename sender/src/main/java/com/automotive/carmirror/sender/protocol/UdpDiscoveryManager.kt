@@ -1,17 +1,21 @@
 package com.automotive.carmirror.sender.protocol
 
+import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.*
 import java.net.*
 
 /**
- * Gerenciador de Descoberta Zero-Config via UDP Broadcast.
- * Varre todas as interfaces de rede ativas (incluindo interface de Hotspot tethering como ap0/wlan1/swlan0)
- * e anuncia o servidor TCP para a central multimídia T3L a cada 1 segundo, além de responder
- * instantaneamente a pacotes de Probe vindos da T3L.
+ * Gerenciador de Descoberta Zero-Config Duplo (UDP Broadcast + NSD/mDNS).
+ * - Engine 1: UDP Broadcast ativo na porta 49150 em todas as sub-redes (Hotspot ap0/swlan0 + Wi-Fi).
+ * - Engine 2: Registro oficial NSD / mDNS (_carmirror._tcp.) para roteadores que filtram broadcast.
+ * - Responde instantaneamente a probes da central multimídia T3L.
  */
 class UdpDiscoveryManager(
+    private val context: Context,
     private val tcpPort: Int = MirrorProtocol.TCP_STREAM_PORT,
     private val getCurrentProfile: () -> StreamProfile
 ) {
@@ -37,9 +41,12 @@ class UdpDiscoveryManager(
 
     private var discoveryJob: Job? = null
     private var udpSocket: DatagramSocket? = null
+    private var nsdManager: NsdManager? = null
+    private var nsdRegListener: NsdManager.RegistrationListener? = null
 
     fun start(scope: CoroutineScope) {
         if (discoveryJob?.isActive == true) return
+        registerNsdService()
 
         discoveryJob = scope.launch(Dispatchers.IO) {
             try {
@@ -50,7 +57,7 @@ class UdpDiscoveryManager(
                 }
                 udpSocket = socket
 
-                // Coroutine 1: Responder imediatamente a Probes da Central Multimídia T3L
+                // Coroutine 1: Responde imediatamente a probes UDP da T3L
                 launch {
                     val recvBuf = ByteArray(512)
                     while (isActive && !socket.isClosed) {
@@ -59,7 +66,9 @@ class UdpDiscoveryManager(
                             socket.receive(packet)
                             val msg = String(packet.data, 0, packet.length, Charsets.UTF_8)
                             if (msg.startsWith(MirrorProtocol.DISCOVERY_MAGIC_PROBE)) {
-                                val localIp = findBestLocalIpForPeer(packet.address) ?: getLocalIpAddresses().firstOrNull() ?: "0.0.0.0"
+                                val localIp = findBestLocalIpForPeer(packet.address)
+                                    ?: getLocalIpAddresses().firstOrNull()
+                                    ?: "0.0.0.0"
                                 val beacon = buildBeaconPayload(localIp)
                                 val replyPacket = DatagramPacket(
                                     beacon,
@@ -77,14 +86,40 @@ class UdpDiscoveryManager(
                     }
                 }
 
-                // Coroutine 2: Emitir Broadcast ativo em todas as sub-redes Wi-Fi / Hotspot a cada 1s
+                // Coroutine 2: Emite Broadcast ativo em todas as interfaces Wi-Fi/Hotspot a cada 900ms
                 while (isActive && !socket.isClosed) {
                     broadcastBeaconToAllInterfaces(socket)
-                    delay(1000L)
+                    delay(900L)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Falha ao iniciar UdpDiscoveryManager: ${e.message}", e)
             }
+        }
+    }
+
+    private fun registerNsdService() {
+        try {
+            val mgr = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
+            val serviceInfo = NsdServiceInfo().apply {
+                serviceName = "${MirrorProtocol.NSD_SERVICE_NAME}_${Build.MODEL.replace(" ", "")}"
+                serviceType = MirrorProtocol.NSD_SERVICE_TYPE
+                port = tcpPort
+            }
+            val listener = object : NsdManager.RegistrationListener {
+                override fun onServiceRegistered(info: NsdServiceInfo) {
+                    Log.i(TAG, "Serviço mDNS/NSD registrado: ${info.serviceName}")
+                }
+                override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                    Log.w(TAG, "Registro mDNS/NSD falhou (code=$errorCode)")
+                }
+                override fun onServiceUnregistered(info: NsdServiceInfo) {}
+                override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {}
+            }
+            mgr.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
+            nsdManager = mgr
+            nsdRegListener = listener
+        } catch (e: Exception) {
+            Log.w(TAG, "Aviso ao registrar mDNS/NSD: ${e.message}")
         }
     }
 
@@ -95,12 +130,17 @@ class UdpDiscoveryManager(
             udpSocket?.close()
         } catch (_: Exception) {}
         udpSocket = null
+
+        try {
+            nsdRegListener?.let { nsdManager?.unregisterService(it) }
+        } catch (_: Exception) {}
+        nsdRegListener = null
+        nsdManager = null
     }
 
     private fun buildBeaconPayload(ipAddress: String): ByteArray {
         val profile = getCurrentProfile()
         val deviceName = Build.MODEL.replace("|", "_")
-        // Formato: CARMIRROR_SENDER_V1|<ip>|<tcpPort>|<width>|<height>|<fps>|<deviceName>
         val payload = "${MirrorProtocol.DISCOVERY_MAGIC_BEACON}|$ipAddress|$tcpPort|${profile.width}|${profile.height}|${profile.fps}|$deviceName"
         return payload.toByteArray(Charsets.UTF_8)
     }
@@ -117,13 +157,9 @@ class UdpDiscoveryManager(
                         val localIp = inetAddr.hostAddress ?: continue
                         val payload = buildBeaconPayload(localIp)
                         try {
-                            val packet = DatagramPacket(
-                                payload,
-                                payload.size,
-                                bcast,
-                                MirrorProtocol.UDP_DISCOVERY_PORT
+                            socket.send(
+                                DatagramPacket(payload, payload.size, bcast, MirrorProtocol.UDP_DISCOVERY_PORT)
                             )
-                            socket.send(packet)
                         } catch (_: Exception) {}
                     }
                 }
@@ -143,7 +179,6 @@ class UdpDiscoveryManager(
                 val addr = ifaceAddr.address
                 if (addr is Inet4Address) {
                     val localBytes = addr.address
-                    // Compara os 3 primeiros octetos (/24 comum de Hotspot Android)
                     if (localBytes[0] == peerBytes[0] &&
                         localBytes[1] == peerBytes[1] &&
                         localBytes[2] == peerBytes[2]

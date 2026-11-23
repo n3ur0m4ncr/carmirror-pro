@@ -67,7 +67,10 @@ class ScreenCaptureService : Service() {
         val activeProfile: StreamProfile = StreamProfile.PROFILE_T3L_NATIVE,
         val localIps: List<String> = emptyList(),
         val isDimScreenActive: Boolean = false,
-        val isReceiverOnlyAudio: Boolean = true
+        val isReceiverOnlyAudio: Boolean = true,
+        val rttMs: Int = 0,
+        val activeBitrateKbps: Int = 0,
+        val liveFps: Int = 0
     )
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -295,8 +298,19 @@ class ScreenCaptureService : Service() {
             },
             onStopRemoteCommand = {
                 stopMirroringAndSelf()
+            },
+            onAdaptiveBitrateChange = { newBitrateBps ->
+                videoEncoder?.updateBitrate(newBitrateBps)
+            },
+            onTelemetryUpdated = { rttMs, bitrateKbps, fps ->
+                _serviceState.value = _serviceState.value.copy(
+                    rttMs = rttMs,
+                    activeBitrateKbps = bitrateKbps,
+                    liveFps = fps
+                )
             }
         )
+        server.setProfileTargetBitrate(initialProfile.bitrateBps)
         server.start()
         streamingServer = server
 
@@ -330,6 +344,7 @@ class ScreenCaptureService : Service() {
         audioCapturer = audio
 
         val discovery = UdpDiscoveryManager(
+            context = this,
             tcpPort = MirrorProtocol.TCP_STREAM_PORT,
             getCurrentProfile = { videoEncoder?.currentProfile ?: initialProfile }
         )

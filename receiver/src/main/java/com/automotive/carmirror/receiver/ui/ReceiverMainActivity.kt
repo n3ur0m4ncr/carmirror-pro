@@ -50,6 +50,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var floatingNavBar: LinearLayout
     private lateinit var navTogglePill: TextView
     private lateinit var touchbackBadge: TextView
+    private lateinit var telemetryBadge: TextView
     private lateinit var audioMuteBtn: Button
     private lateinit var dimPhoneBtn: Button
 
@@ -70,8 +71,9 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     @Volatile
     private var isOtaDownloading = false
 
+    // Auto-Connect imediato estilo CarPlay/Android Auto Wireless (conecta sozinho em <1s!)
     @Volatile
-    private var autoConnectRequested = false
+    private var autoConnectRequested = true
 
     private var lastMoveSentTimeMs = 0L
 
@@ -91,6 +93,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         streamingClient = MirrorStreamingClient(
             videoDecoder = videoDecoder,
             audioPlayer = audioPlayer,
+            getActiveWifiNetwork = { discoveryClient.activeWifiNetwork },
             onConnectionStateChanged = { connected, message ->
                 runOnUiThread {
                     statusTextView.text = message
@@ -98,7 +101,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     if (connected) {
                         enforceImmersiveFullscreen()
                     } else if (autoConnectRequested) {
-                        radarPillText.text = "RECONEXÃO AUTOMÁTICA"
+                        radarPillText.text = "AUTO-CONEXÃO RÁPIDA ATIVA"
                         radarPillText.setTextColor(Color.parseColor("#FBBF24"))
                         setRadarDotColor("#F59E0B")
                     }
@@ -132,6 +135,12 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         dimPhoneBtn.text = "☀ Tela Celular"
                         dimPhoneBtn.background = createBorderedRoundedDrawable("#152036", "#334155", 1, dp(10))
                     }
+                }
+            },
+            onTelemetryReceived = { rttMs, bitrateKbps, fps ->
+                runOnUiThread {
+                    val mbps = String.format("%.1f", bitrateKbps / 1000.0)
+                    telemetryBadge.text = "⚡ ${rttMs}ms • ${mbps}M • ${fps}fps"
                 }
             }
         )
@@ -235,7 +244,7 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         })
         brandTexts.addView(TextView(this).apply {
-            text = "Wireless H.264 Cockpit • v1.7"
+            text = "Wireless H.264 Cockpit • v2.0 PRO"
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         })
@@ -266,9 +275,9 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val hwRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        hwRow.addView(createHardwareChip("HW VPU H.264"))
-        hwRow.addView(createHardwareChip("44.1kHz PCM"))
-        hwRow.addView(createHardwareChip("Touchback"))
+        hwRow.addView(createHardwareChip("Okio ABR"))
+        hwRow.addView(createHardwareChip("HW VPU"))
+        hwRow.addView(createHardwareChip("Auto-Connect"))
         leftPane.addView(hwRow)
 
         connectionOverlay.addView(
@@ -435,6 +444,19 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 setPadding(dp(10), dp(4), dp(10), dp(4))
             }
             dockHeader.addView(touchbackBadge, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(8) })
+
+            telemetryBadge = TextView(context).apply {
+                text = "⚡ Okio ABR"
+                setTextColor(Color.parseColor("#38BDF8"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                typeface = Typeface.MONOSPACE
+                background = createBorderedRoundedDrawable("#0F2942", "#1E4976", 1, dp(10))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+            }
+            dockHeader.addView(telemetryBadge, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { marginEnd = dp(10) })
@@ -671,18 +693,45 @@ class ReceiverMainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun startAutoDiscovery() {
         discoveryClient.startDiscovery(lifecycleScope) { sender ->
             latestDiscoveredSender = sender
+            saveLastSenderIp(sender.ipAddress)
             runOnUiThread {
                 radarPillText.text = "SMARTPHONE DETECTADO ✓"
                 radarPillText.setTextColor(Color.parseColor("#34D399"))
                 setRadarDotColor("#10B981")
 
                 discoveredDeviceTitle.text = sender.deviceName
-                discoveredDeviceMeta.text = "IP ${sender.ipAddress}  •  Vídeo ${sender.width}×${sender.height} @ ${sender.fps}fps  •  Áudio Stereo"
+                discoveredDeviceMeta.text = "IP ${sender.ipAddress}  •  Vídeo ${sender.width}×${sender.height} @ ${sender.fps}fps  •  Okio ABR"
 
                 if (autoConnectRequested && !streamingClient.isConnectedNow()) {
                     streamingClient.connectWithAutoReconnect(sender.ipAddress, sender.tcpPort)
                 }
             }
+        }
+
+        // Fast-Connect imediato: tenta conectar no Gateway do Hotspot ou último IP salvo sem esperar
+        if (autoConnectRequested && !streamingClient.isSessionActive()) {
+            val fastIp = discoveryClient.getWifiGatewayIp() ?: getLastSenderIp()
+            if (!fastIp.isNullOrBlank()) {
+                streamingClient.connectWithAutoReconnect(fastIp, MirrorProtocol.TCP_STREAM_PORT)
+            }
+        }
+    }
+
+    private fun saveLastSenderIp(ip: String) {
+        try {
+            getSharedPreferences("carmirror_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("last_sender_ip", ip)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun getLastSenderIp(): String? {
+        return try {
+            getSharedPreferences("carmirror_prefs", Context.MODE_PRIVATE)
+                .getString("last_sender_ip", null)
+        } catch (_: Exception) {
+            null
         }
     }
 

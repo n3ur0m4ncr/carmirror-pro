@@ -11,8 +11,8 @@ android {
         applicationId = "com.automotive.carmirror.receiver"
         minSdk = 26
         targetSdk = 31 // Target específico para Allwinner T3L (Android 12 / API 31)
-        versionCode = 10
-        versionName = "1.7.0-T3L"
+        versionCode = 11
+        versionName = "2.0.0-T3L"
 
         // CRÍTICO para Allwinner T3L (ARM Cortex-A7 32-bit):
         // Garante compatibilidade com armeabi-v7a (32-bit) e arm64-v8a (64-bit)
@@ -59,8 +59,9 @@ android {
 }
 
 dependencies {
-    // Footprint mínimo de RAM para placa T3L de 2.0 GB RAM
+    // Footprint mínimo de RAM para placa T3L de 2.0 GB RAM + Okio Zero-Copy I/O
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("com.squareup.okio:okio:3.9.0")
 }
