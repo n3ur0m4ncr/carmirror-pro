@@ -156,7 +156,14 @@ class MirrorStreamingClient(
                     }
 
                     if (payloadLen > 0) {
-                        source.readFully(reusableReadBuffer, 0, payloadLen)
+                        var offset = 0
+                        while (offset < payloadLen) {
+                            val readNow = source.read(reusableReadBuffer, offset, payloadLen - offset)
+                            if (readNow == -1) {
+                                throw java.io.EOFException("Conexão encerrada durante leitura do quadro")
+                            }
+                            offset += readNow
+                        }
                     }
 
                     when (packetType) {
